@@ -1,0 +1,5 @@
+assign filename input
+assign data input
+semWait file
+writeFile filename data
+semSignal file
