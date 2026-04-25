@@ -4,13 +4,13 @@
 #include "queue.h"
 
 typedef struct {
-    char  name[20];       /* "userInput", "userOutput", or "file" */
-    int   locked;         /* 0 = free, 1 = held */
-    int   ownerPid;       /* PID of the holding process (-1 if free) */
-    Queue blockedQueue;   /* processes waiting for THIS mutex */
+    char  name[20];
+    int   locked;
+    int   ownerPid;
+    Queue blockedQueue;
 } Mutex;
 
-/* Three global mutexes — declared in mutex.c, extern'd here */
+
 extern Mutex mutexUserInput;
 extern Mutex mutexUserOutput;
 extern Mutex mutexFile;

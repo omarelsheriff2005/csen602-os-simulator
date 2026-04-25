@@ -48,8 +48,25 @@ char* sysReadFile(char* filename) {
         size--;
     }
 
-    return buf;  /* caller must free() */
+    return buf;
 }
 
-char* sysMemRead(int addr)             { return memRead(addr); }
-void  sysMemWrite(int addr, char* val) { memWrite(addr, val);  }
+char* sysMemRead(PCB* p, int addr) {
+    if (!p || addr < p->memLower || addr > p->memUpper) {
+        simLog("ERROR: P%d attempted memory read outside its bounds at %d",
+               p ? p->pid : -1, addr);
+        return NULL;
+    }
+
+    return memRead(addr);
+}
+
+void sysMemWrite(PCB* p, int addr, char* val) {
+    if (!p || addr < p->memLower || addr > p->memUpper) {
+        simLog("ERROR: P%d attempted memory write outside its bounds at %d",
+               p ? p->pid : -1, addr);
+        return;
+    }
+
+    memWrite(addr, val);
+}

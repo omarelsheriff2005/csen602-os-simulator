@@ -4,16 +4,16 @@
 #include "queue.h"
 #include "pcb.h"
 
-#define RR_QUANTUM 2   /* instructions per time slice — change here for evaluation */
+#define RR_QUANTUM 2
 
-/* Global process table — defined in main.c, used by scheduler and swap */
+
 extern PCB* allProcesses[];
 extern int  processCount;
 
 void  scheduleRR(Queue* readyQ, Queue* blockedQ);
 void  scheduleHRRN(Queue* readyQ, Queue* blockedQ);
 
-/* MLFQ (bonus) */
+
 extern Queue mlfqQueues[4];
 void  initMLFQ();
 void  mlfqEnqueue(PCB* p);

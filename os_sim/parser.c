@@ -127,8 +127,20 @@ int executeInstruction(PCB* p, Queue* readyQ, Queue* blockedQ) {
             sysPrint(value);
         } else if (strcmp(cmd, "assign") == 0) {
             if (arg2 != NULL && strcmp(arg2, "input") == 0) {
+                Mutex* inputMutex = getMutex("userInput");
+                int alreadyOwnsInput = inputMutex && inputMutex->locked && inputMutex->ownerPid == p->pid;
+                int autoReleaseInput = 0;
+
+                if (!alreadyOwnsInput) {
+                    semWait("userInput", p, readyQ, blockedQ);
+                    if (p->state == BLOCKED)
+                        return 0;
+                    autoReleaseInput = 1;
+                }
+
                 if (guiMode) {
                     simState.waitingForInput = 1;
+                    simState.inputAutoRelease = autoReleaseInput;
                     simState.inputProcess = p;
                     strncpy(simState.inputVarName, arg1, sizeof(simState.inputVarName) - 1);
                     simState.inputVarName[sizeof(simState.inputVarName) - 1] = '\0';
@@ -144,6 +156,8 @@ int executeInstruction(PCB* p, Queue* readyQ, Queue* blockedQ) {
                     char* val = sysGetInput();
                     setVar(p, arg1, val);
                     simLog("[INPUT] P%d: %s = %s", p->pid, arg1, val);
+                    if (autoReleaseInput)
+                        semSignal("userInput", readyQ, blockedQ);
                 }
             } else if (arg2 != NULL && strcmp(arg2, "readFile") == 0) {
                 char* arg3 = strtok(NULL, " ");

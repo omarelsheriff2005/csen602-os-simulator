@@ -1,17 +1,14 @@
 gh.zip
 gh_portable/
-
-# OS simulation build artifacts
 *.o
 *.exe
 *.dll
 *.a
 swap_pid*.txt
-
-# Local logs / outputs
 os_sim/build_*.txt
 os_sim/build_err.txt
 os_sim/build_errors.txt
 os_sim/build_log.txt
 os_sim/build_out.txt
 os_sim/err.txt
+os_sim/out.txt

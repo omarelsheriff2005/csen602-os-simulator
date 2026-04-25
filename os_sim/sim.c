@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-#include <windows.h>
 #include "sim.h"
 #include "pcb.h"
 #include "memory.h"
@@ -15,6 +14,7 @@
 #define ARRIVAL_P1 0
 #define ARRIVAL_P2 1
 #define ARRIVAL_P3 4
+#define PATH_BUF 512
 
 int currentClock = 0;
 
@@ -33,7 +33,7 @@ static const char* files[3] = {
     "programs/Program3.txt"
 };
 static int arrivals[3] = {ARRIVAL_P1, ARRIVAL_P2, ARRIVAL_P3};
-static char resolvedFiles[3][MAX_PATH];
+static char resolvedFiles[3][PATH_BUF];
 
 static int allArrivalsHandled(void) {
     for (int i = 0; i < 3; i++) {
@@ -60,33 +60,21 @@ static int fileExists(const char* path) {
     return 1;
 }
 
-static void stripFilename(char* path) {
-    char* slash = strrchr(path, '\\');
-    char* altSlash = strrchr(path, '/');
-
-    if (altSlash && (!slash || altSlash > slash))
-        slash = altSlash;
-
-    if (slash)
-        *slash = '\0';
-    else
-        strcpy(path, ".");
-}
-
 static int resolveProgramPath(const char* relativePath, char* out, size_t outSize) {
-    char exePath[MAX_PATH];
+    char candidate[PATH_BUF];
 
     if (fileExists(relativePath)) {
         snprintf(out, outSize, "%s", relativePath);
         return 1;
     }
 
-    if (GetModuleFileNameA(NULL, exePath, MAX_PATH) == 0)
-        return 0;
+    snprintf(candidate, sizeof(candidate), "os_sim/%s", relativePath);
+    if (fileExists(candidate)) {
+        snprintf(out, outSize, "%s", candidate);
+        return 1;
+    }
 
-    stripFilename(exePath);
-    snprintf(out, outSize, "%s/%s", exePath, relativePath);
-    return fileExists(out);
+    return 0;
 }
 
 static int prepareProgramPaths(void) {
@@ -292,6 +280,9 @@ void simProvideInput(const char* value) {
     p->programCounter++;
     nextAddr = p->memLower + INSTR_OFFSET + p->programCounter;
 
+    if (simState.inputAutoRelease)
+        semSignal("userInput", &readyQ, &blockedQ);
+
     if (nextAddr > p->memUpper || memRead(nextAddr) == NULL) {
         simMarkFinished(p);
     } else {
@@ -300,6 +291,7 @@ void simProvideInput(const char* value) {
 
     simState.waitingForInput = 0;
     simState.inputProcess = NULL;
+    simState.inputAutoRelease = 0;
     simState.inputVarName[0] = '\0';
     simState.inputPrompt[0] = '\0';
 }
@@ -343,6 +335,9 @@ int simStep(void) {
         scheduleMLFQ(&blockedQ);
     else
         scheduleRR(&readyQ, &blockedQ);
+
+    printMemory();
+    printMutexState();
 
     if (allArrivalsHandled() && allCreatedFinished()) {
         simLog("[SIM] All processes finished at clock %d.", currentClock);
