@@ -19,15 +19,34 @@ static Font guiFont;
 static int  fontLoaded = 0;
 
 static int   autoRun       = 0;
-static float autoSpeed     = 2.0f;
+static float autoSpeed     = 4.0f;
 static float autoTimer     = 0.0f;
 static int   memScroll     = 0;
 static int   logScroll     = 0;
 static int   procScroll    = 0;
 static char  inputBuf[256] = "";
 static int   inputActive   = 0;
+static char  lastOutputLine[LOG_LINE_LEN] = "";
+static char  outputLines[32][LOG_LINE_LEN];
+static int   outputLineCount = 0;
+static int   outputScroll = 0;
+static int   outputFollowTail = 1;
 #define GUI_MAX_PROC 32
+#define PARTICLE_COUNT 150
 static float swapFlashT[GUI_MAX_PROC] = {0};
+static float schedHoverT[3] = {0};
+static int   logFollowTail = 1;
+static int   logPanelSerial = 0;
+
+typedef struct Particle {
+    Vector2 pos;
+    Vector2 vel;
+    float radius;
+    float alpha;
+} Particle;
+
+static Particle particles[PARTICLE_COUNT];
+static int particlesReady = 0;
 
 
 
@@ -44,9 +63,45 @@ static int measureText(const char* text, int size) {
     return MeasureText(text, size);
 }
 
+static float clamp01(float v) {
+    if (v < 0.0f) return 0.0f;
+    if (v > 1.0f) return 1.0f;
+    return v;
+}
+
+static Color mixColor(Color a, Color b, float t) {
+    t = clamp01(t);
+    return (Color){
+        (unsigned char)(a.r + (b.r - a.r) * t),
+        (unsigned char)(a.g + (b.g - a.g) * t),
+        (unsigned char)(a.b + (b.b - a.b) * t),
+        (unsigned char)(a.a + (b.a - a.a) * t)
+    };
+}
+
+static Color alphaColor(Color c, unsigned char a) {
+    c.a = a;
+    return c;
+}
+
+static float approach(float current, float target, float speed, float dt) {
+    float delta = target - current;
+    float step = speed * dt;
+    if (delta > step) return current + step;
+    if (delta < -step) return current - step;
+    return target;
+}
+
 
 static void drawTextV(const char* text, int x, int y, int rowH, int size, Color c) {
     drawText(text, x, y + (rowH - size) / 2, size, c);
+}
+
+static void clearGuiOutput(void) {
+    lastOutputLine[0] = '\0';
+    outputLineCount = 0;
+    outputScroll = 0;
+    outputFollowTail = 1;
 }
 
 
@@ -71,17 +126,73 @@ static const char* stateShort(ProcessState s) {
     }
 }
 
+static void initParticles(int w, int h) {
+    for (int i = 0; i < PARTICLE_COUNT; i++) {
+        particles[i].pos = (Vector2){(float)GetRandomValue(0, w), (float)GetRandomValue(0, h)};
+        particles[i].vel = (Vector2){
+            (float)GetRandomValue(-26, 26) / 10.0f,
+            (float)GetRandomValue(10, 34) / 10.0f
+        };
+        particles[i].radius = (float)GetRandomValue(14, 38) / 10.0f;
+        particles[i].alpha = (float)GetRandomValue(54, 138);
+    }
+    particlesReady = 1;
+}
+
+static void drawParticleBackground(int w, int h, float dt) {
+    if (!particlesReady)
+        initParticles(w, h);
+
+    DrawRectangle(0, 0, w, h, CLR_BG);
+
+    for (int i = 0; i < PARTICLE_COUNT; i++) {
+        Particle* p = &particles[i];
+        p->pos.x += p->vel.x * dt * 18.0f;
+        p->pos.y += p->vel.y * dt * 18.0f;
+
+        if (p->pos.x < -20) p->pos.x = (float)w + 20;
+        if (p->pos.x > w + 20) p->pos.x = -20;
+        if (p->pos.y < -20) p->pos.y = (float)h + 20;
+        if (p->pos.y > h + 20) p->pos.y = -20;
+
+        DrawCircleV(p->pos, p->radius, (Color){63, 216, 138, (unsigned char)p->alpha});
+        DrawCircleV(p->pos, p->radius * 2.8f, (Color){63, 216, 138, (unsigned char)(p->alpha * 0.12f)});
+    }
+
+    for (int i = 0; i < PARTICLE_COUNT; i++) {
+        for (int j = i + 1; j < PARTICLE_COUNT; j++) {
+            float dx = particles[i].pos.x - particles[j].pos.x;
+            float dy = particles[i].pos.y - particles[j].pos.y;
+            float d2 = dx * dx + dy * dy;
+            if (d2 < 17000.0f) {
+                unsigned char a = (unsigned char)(44.0f * (1.0f - d2 / 17000.0f));
+                DrawLineEx(particles[i].pos, particles[j].pos, 1.0f, (Color){63, 216, 138, a});
+            }
+        }
+    }
+
+    DrawRectangleGradientV(0, 0, w, h, (Color){12, 15, 18, 35}, (Color){8, 10, 12, 150});
+}
+
+static void drawParticleOverlay(void) {
+    for (int i = 0; i < PARTICLE_COUNT; i += 3) {
+        DrawCircleV(particles[i].pos, particles[i].radius * 0.8f, (Color){128, 240, 180, 24});
+    }
+}
+
 static void drawPanel(int x, int y, int w, int h, const char* title) {
 
-    DrawRectangle(x, y, w, h, CLR_PANEL);
+    Rectangle r = {(float)x, (float)y, (float)w, (float)h};
+    DrawRectangleRounded((Rectangle){(float)(x + 2), (float)(y + 3), (float)w, (float)h}, 0.035f, 8, (Color){0, 0, 0, 70});
+    DrawRectangleRounded(r, 0.035f, 8, CLR_PANEL);
 
-    DrawRectangle(x, y, w, PANEL_HDR_H, CLR_PANEL_HDR);
+    DrawRectangleRounded((Rectangle){(float)x, (float)y, (float)w, (float)PANEL_HDR_H}, 0.035f, 8, CLR_PANEL_HDR);
 
     DrawRectangle(x, y + PANEL_HDR_H, w, 1, CLR_PANEL_BDR);
 
     drawTextV(title, x + 12, y, PANEL_HDR_H, FONT_H1, CLR_ACCENT);
 
-    DrawRectangleLinesEx((Rectangle){(float)x, (float)y, (float)w, (float)h}, 1, CLR_PANEL_BDR);
+    DrawRectangleRoundedLines(r, 0.035f, 8, CLR_PANEL_BDR);
 }
 
 
@@ -101,7 +212,9 @@ static int drawButton(int x, int y, int w, int h, const char* label, Color bg, C
     Color bc = isHover ? hover : bg;
     if (!enabled) { bc = (Color){45, 48, 62, 255}; fg = CLR_TEXT_MUTED; }
 
-    DrawRectangleRounded(r, 0.25f, 6, bc);
+    if (isHover)
+        DrawRectangleRounded((Rectangle){r.x - 1, r.y - 1, r.width + 2, r.height + 2}, 0.24f, 8, alphaColor(hover, 70));
+    DrawRectangleRounded(r, 0.22f, 8, bc);
     int tw = measureText(label, FONT_BODY);
     drawTextV(label, x + (w - tw) / 2, y, h, FONT_BODY, fg);
 
@@ -131,34 +244,61 @@ static void drawQueueChips(int x, int y, int maxW, int rowH, Queue* q) {
 
 
 
-static void drawTopBar(int w) {
-    DrawRectangle(0, 0, w, HDR_H, CLR_PANEL_HDR);
+static int drawSchedulerOption(int i, int x, int y, int w, int h, const char* label, Color accent, int selected, int enabled, float dt) {
+    Rectangle r = {(float)x, (float)y, (float)w, (float)h};
+    Vector2 m = GetMousePosition();
+    int hover = enabled && CheckCollisionPointRec(m, r);
+    float target = (hover || selected) ? 1.0f : 0.0f;
+    schedHoverT[i] = approach(schedHoverT[i], target, 7.5f, dt);
+
+    float t = schedHoverT[i];
+    float lift = selected ? 2.0f : t * 4.0f;
+    Color base = selected ? mixColor(accent, CLR_PANEL_HDR, 0.10f) : CLR_BTN_BG;
+    Color bg = mixColor(base, accent, selected ? 0.14f : 0.10f * t);
+    Color fg = enabled ? mixColor(CLR_TEXT_DIM, CLR_TEXT, selected ? 1.0f : t) : CLR_TEXT_MUTED;
+
+    Rectangle glow = {r.x - 2, r.y - lift - 2, r.width + 4, r.height + 4};
+    DrawRectangleRounded(glow, 0.18f, 8, alphaColor(accent, (unsigned char)(30 + 55 * t)));
+    DrawRectangleRounded((Rectangle){r.x, r.y - lift, r.width, r.height}, 0.16f, 8, bg);
+    DrawRectangle((int)r.x + 10, (int)(r.y + r.height - 4 - lift), (int)(r.width - 20), 3, alphaColor(accent, selected ? 255 : (unsigned char)(80 + 120 * t)));
+
+    int tw = measureText(label, FONT_BODY);
+    drawTextV(label, x + (w - tw) / 2, (int)(y - lift), h, FONT_BODY, fg);
+
+    return enabled && hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
+static void drawTopBar(int w, float dt) {
+    DrawRectangle(0, 0, w, HDR_H, (Color){18, 23, 25, 235});
     DrawRectangle(0, HDR_H, w, 1, CLR_PANEL_BDR);
 
 
     drawTextV("OS Simulation", PAD + 4, 0, HDR_H, FONT_TITLE, CLR_TEXT);
     int tw = measureText("OS Simulation", FONT_TITLE);
-    drawTextV("CSEN 602", PAD + 4 + tw + 10, 0, HDR_H, FONT_BODY, CLR_TEXT_DIM);
+    drawTextV("CSEN 602", PAD + 4 + tw + 12, 0, HDR_H, FONT_SMALL, CLR_TEXT_DIM);
 
 
     const char* modes[]  = {"rr", "hrrn", "mlfq"};
     const char* labels[] = {"Round Robin", "HRRN", "MLFQ"};
-    int tgW = 360;
+    Color optionColors[] = {
+        (Color){63, 216, 138, 255},
+        (Color){45, 212, 191, 255},
+        (Color){163, 230, 53, 255}
+    };
+    int tgW = 426;
     int tgX = (w - tgW) / 2;
-    int tgY = (HDR_H - 32) / 2;
-    drawTextV("Scheduler:", tgX - 90, 0, HDR_H, FONT_BODY, CLR_TEXT_DIM);
+    int tgY = (HDR_H - 38) / 2;
+    drawTextV("Scheduler", tgX - 92, 0, HDR_H, FONT_SMALL, CLR_TEXT_DIM);
 
     for (int i = 0; i < 3; i++) {
-        int bw = 115;
-        int bx = tgX + i * (bw + 6);
+        int bw = 134;
+        int bx = tgX + i * (bw + 8);
         int selected = (strcmp(simState.schedulerMode, modes[i]) == 0);
-        Color bg = selected ? CLR_ACCENT : CLR_BTN_BG;
-        Color fg = selected ? CLR_BG     : CLR_TEXT_DIM;
-        Color hv = selected ? CLR_ACCENT_HI : CLR_BTN_HOVER;
-
         int canSwitch = (!simState.running || simState.clock == 0);
-        if (drawButton(bx, tgY, bw, 32, labels[i], bg, hv, fg, canSwitch))
+        if (drawSchedulerOption(i, bx, tgY, bw, 38, labels[i], optionColors[i], selected, canSwitch, dt)) {
+            clearGuiOutput();
             simReset(modes[i]);
+        }
     }
 
 
@@ -176,64 +316,35 @@ static void drawControlStrip(int y, int w) {
     DrawRectangle(0, y + CTRL_H - 1, w, 1, CLR_PANEL_BDR);
 
     int bx = PAD;
-    int by = y + (CTRL_H - 36) / 2;
-    int bh = 36;
+    int by = y + (CTRL_H - 40) / 2;
+    int bh = 40;
 
     int canStep = simState.running && !simState.waitingForInput;
 
 
-    if (drawButton(bx, by, 88, bh, "STEP", CLR_ACCENT, CLR_ACCENT_HI, CLR_BG, canStep)) {
+    if (drawButton(bx, by, 104, bh, "STEP", CLR_ACCENT, CLR_ACCENT_HI, CLR_BG, canStep)) {
         autoRun = 0;
         simStep();
     }
-    bx += 88 + GAP;
+    bx += 104 + GAP;
 
 
     if (autoRun) {
-        if (drawButton(bx, by, 88, bh, "PAUSE", CLR_BTN_BG, CLR_BTN_HOVER, CLR_TEXT, 1))
+        if (drawButton(bx, by, 104, bh, "PAUSE", CLR_BTN_BG, CLR_BTN_HOVER, CLR_TEXT, 1))
             autoRun = 0;
     } else {
-        if (drawButton(bx, by, 88, bh, "RUN", CLR_READY, (Color){120,220,150,255}, CLR_BG, canStep))
+        if (drawButton(bx, by, 104, bh, "RUN", CLR_READY, CLR_ACCENT_HI, CLR_BG, canStep))
             autoRun = 1;
     }
-    bx += 88 + GAP;
+    bx += 104 + GAP;
 
 
-    if (drawButton(bx, by, 88, bh, "RESET", CLR_BTN_DANGER, (Color){170, 70, 80, 255}, CLR_TEXT, 1)) {
+    if (drawButton(bx, by, 104, bh, "RESET", CLR_BTN_DANGER, (Color){178, 68, 72, 255}, CLR_TEXT, 1)) {
         autoRun = 0;
+        clearGuiOutput();
         simReset(simState.schedulerMode);
     }
-    bx += 88 + PAD * 2;
-
-
-    drawTextV("SPEED", bx, y, CTRL_H, FONT_SMALL, CLR_TEXT_DIM);
-    bx += 54;
-    Rectangle slide = {(float)bx, (float)(by + 10), 240, 16};
-
-    DrawRectangleRounded(slide, 0.5f, 4, CLR_BTN_BG);
-
-    float t = (autoSpeed - 0.5f) / (20.0f - 0.5f);
-    if (t < 0) t = 0;
-    if (t > 1) t = 1;
-    DrawRectangleRounded((Rectangle){slide.x, slide.y, slide.width * t, slide.height}, 0.5f, 4, CLR_ACCENT);
-
-    float kx = slide.x + slide.width * t;
-    DrawCircle((int)kx, (int)(slide.y + slide.height / 2), 9, CLR_ACCENT_HI);
-
-
-    Vector2 m = GetMousePosition();
-    Rectangle hit = {slide.x - 8, slide.y - 10, slide.width + 16, slide.height + 20};
-    if (CheckCollisionPointRec(m, hit) && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-        float nt = (m.x - slide.x) / slide.width;
-        if (nt < 0) nt = 0;
-        if (nt > 1) nt = 1;
-        autoSpeed = 0.5f + nt * (20.0f - 0.5f);
-    }
-    bx += 240 + GAP;
-    char stext[16];
-    snprintf(stext, sizeof(stext), "%.1fx", autoSpeed);
-    drawTextV(stext, bx, y, CTRL_H, FONT_BODY, CLR_TEXT);
-    bx += 60;
+    bx += 104 + PAD * 2;
 
 
     const char* status = "IDLE";
@@ -266,7 +377,7 @@ static void drawMemoryPanel(int x, int y, int w, int h) {
     int cx = x + 10;
     int cy = y + PANEL_HDR_H + 6;
     int innerH = h - PANEL_HDR_H - 10;
-    int rowH = 18;
+    int rowH = 22;
     int visible = innerH / rowH;
     int maxScroll = MEM_SIZE - visible;
     if (maxScroll < 0) maxScroll = 0;
@@ -301,20 +412,20 @@ static void drawMemoryPanel(int x, int y, int w, int h) {
             int pidx = ownerPid - 1;
             Color strip = stateColor(allProcesses[pidx]->state);
             if (pidx >= 0 && pidx < GUI_MAX_PROC && swapFlashT[pidx] > 0) strip = CLR_SWAP_FLASH;
-            DrawRectangle(cx - 4, ry, 3, rowH, strip);
+            DrawRectangle(cx - 4, ry, 4, rowH, strip);
         }
 
         char line[96];
         const char* val = memory[i] ? memory[i] : "";
         snprintf(line, sizeof(line), "%02d", i);
-        drawText(line, cx + 4, ry + 2, FONT_MONO, CLR_TEXT_MUTED);
+        drawText(line, cx + 6, ry + 3, FONT_MONO, CLR_TEXT_MUTED);
 
         if (memory[i]) {
             char trimmed[64];
             snprintf(trimmed, sizeof(trimmed), "%.48s", val);
-            drawText(trimmed, cx + 36, ry + 2, FONT_MONO, CLR_TEXT);
+            drawText(trimmed, cx + 42, ry + 3, FONT_MONO, CLR_TEXT);
         } else {
-            drawText(".", cx + 36, ry + 2, FONT_MONO, CLR_TEXT_MUTED);
+            drawText(".", cx + 42, ry + 3, FONT_MONO, CLR_TEXT_MUTED);
         }
     }
     EndScissorMode();
@@ -347,29 +458,29 @@ static void drawExecutionPanel(int x, int y, int w, int h) {
     cy += 18;
 
 
-    int cardH = 76;
+    int cardH = 90;
     DrawRectangleRounded((Rectangle){(float)cx, (float)cy, (float)(w - 28), (float)cardH}, 0.1f, 6,
                          run ? (Color){50, 55, 72, 255} : CLR_ROW_ALT);
     if (run) {
 
         char pidLabel[16];
         snprintf(pidLabel, sizeof(pidLabel), "P%d", run->pid);
-        DrawRectangleRounded((Rectangle){(float)(cx + 10), (float)(cy + 10), 56, 56}, 0.25f, 6, CLR_RUNNING);
+        DrawRectangleRounded((Rectangle){(float)(cx + 12), (float)(cy + 14), 60, 60}, 0.22f, 8, CLR_RUNNING);
         int tw = measureText(pidLabel, FONT_TITLE);
-        drawText(pidLabel, cx + 10 + (56 - tw) / 2, cy + 10 + (56 - FONT_TITLE) / 2, FONT_TITLE, CLR_BG);
+        drawText(pidLabel, cx + 12 + (60 - tw) / 2, cy + 14 + (60 - FONT_TITLE) / 2, FONT_TITLE, CLR_BG);
 
-        int tx = cx + 80;
-        int ty = cy + 8;
+        int tx = cx + 88;
+        int ty = cy + 10;
         char buf[128];
         const char* instr = simState.currentInstr[0] ? simState.currentInstr : "(idle)";
         const char* memLabel = run->inMemory ? "" : "  [SWAPPED]";
 
         snprintf(buf, sizeof(buf), "PC: %d    Mem: %d-%d%s",
                  run->programCounter, run->memLower, run->memUpper, memLabel);
-        drawText(buf, tx, ty, FONT_BODY, CLR_TEXT); ty += 20;
+        drawText(buf, tx, ty, FONT_BODY, CLR_TEXT); ty += 24;
 
         snprintf(buf, sizeof(buf), "Instr: %.40s", instr);
-        drawText(buf, tx, ty, FONT_MONO, CLR_ACCENT); ty += 20;
+        drawText(buf, tx, ty, FONT_MONO, CLR_ACCENT); ty += 24;
 
         snprintf(buf, sizeof(buf), "Queue: Q%d    Wait: %d    Burst: %d",
                  run->queueLevel, run->waitTime, run->burstTime);
@@ -382,22 +493,65 @@ static void drawExecutionPanel(int x, int y, int w, int h) {
     }
     cy += cardH + 14;
 
+    if (lastOutputLine[0]) {
+        int boxH = 178;
+        int rowH = 16;
+        int visibleOut = (boxH - 42) / rowH;
+        int maxOutScroll = outputLineCount - visibleOut;
+        if (maxOutScroll < 0) maxOutScroll = 0;
+        Rectangle outRect = {(float)cx, (float)cy, (float)(w - 28), (float)boxH};
+        if (CheckCollisionPointRec(GetMousePosition(), outRect)) {
+            float wheel = GetMouseWheelMove();
+            if (wheel != 0) {
+                outputScroll -= (int)wheel;
+                outputFollowTail = wheel < 0;
+            }
+        }
+        if (outputFollowTail)
+            outputScroll = maxOutScroll;
+        if (outputScroll < 0) outputScroll = 0;
+        if (outputScroll > maxOutScroll) outputScroll = maxOutScroll;
+
+        DrawRectangleRounded((Rectangle){(float)cx, (float)cy, (float)(w - 28), (float)boxH}, 0.12f, 8, (Color){16, 42, 31, 230});
+        DrawRectangle(cx + 10, cy + 12, 4, boxH - 24, CLR_READY);
+        drawText("PROGRAM OUTPUT", cx + 24, cy + 9, FONT_SMALL, CLR_TEXT_DIM);
+
+        BeginScissorMode(cx + 24, cy + 30, w - 70, boxH - 38);
+        for (int i = 0; i < visibleOut && outputScroll + i < outputLineCount; i++) {
+            int idx = outputScroll + i;
+            drawText(outputLines[idx], cx + 24, cy + 31 + i * rowH, FONT_MONO, CLR_READY);
+        }
+        EndScissorMode();
+
+        if (maxOutScroll > 0) {
+            int trackX = x + w - 44;
+            int trackY = cy + 30;
+            int trackH = boxH - 42;
+            int thumbH = trackH * visibleOut / outputLineCount;
+            if (thumbH < 28) thumbH = 28;
+            int thumbY = trackY + (int)((float)outputScroll / maxOutScroll * (trackH - thumbH));
+            DrawRectangleRounded((Rectangle){(float)trackX, (float)trackY, 5, (float)trackH}, 0.7f, 4, (Color){44, 58, 54, 180});
+            DrawRectangleRounded((Rectangle){(float)(trackX - 1), (float)thumbY, 7, (float)thumbH}, 0.7f, 4, CLR_ACCENT);
+        }
+        cy += boxH + 14;
+    }
+
 
     drawText("READY QUEUE", cx, cy, FONT_SMALL, CLR_TEXT_DIM);
-    cy += 18;
-    drawQueueChips(cx, cy, w - 28, 26, &readyQ);
-    cy += 32;
+    cy += 20;
+    drawQueueChips(cx, cy, w - 28, 30, &readyQ);
+    cy += 36;
 
 
     drawText("BLOCKED QUEUE", cx, cy, FONT_SMALL, CLR_TEXT_DIM);
-    cy += 18;
-    drawQueueChips(cx, cy, w - 28, 26, &blockedQ);
-    cy += 32;
+    cy += 20;
+    drawQueueChips(cx, cy, w - 28, 30, &blockedQ);
+    cy += 36;
 
 
     int tableY = cy;
     drawText("ALL PROCESSES", cx, cy, FONT_SMALL, CLR_TEXT_DIM);
-    cy += 18;
+    cy += 20;
 
 
     int colPID = cx;
@@ -410,11 +564,11 @@ static void drawExecutionPanel(int x, int y, int w, int h) {
     drawText("Q-LVL",  colQ,     cy, FONT_SMALL, CLR_TEXT_MUTED);
     drawText("WAIT",   colWait,  cy, FONT_SMALL, CLR_TEXT_MUTED);
     drawText("MEM",    colMem,   cy, FONT_SMALL, CLR_TEXT_MUTED);
-    cy += 16;
+    cy += 19;
     DrawRectangle(cx, cy, w - 28, 1, CLR_PANEL_BDR);
     cy += 4;
 
-    int rowH = 22;
+    int rowH = 28;
     int remaining = (y + h) - cy - 8;
     int visibleProc = remaining / rowH;
 
@@ -447,7 +601,7 @@ static void drawExecutionPanel(int x, int y, int w, int h) {
 
 
         const char* ss = stateShort(p->state);
-        drawPill(colState, ry + (rowH - 18) / 2, 18, ss, stateColor(p->state), CLR_BG, 8);
+        drawPill(colState, ry + (rowH - 22) / 2, 22, ss, stateColor(p->state), CLR_BG, 8);
 
         snprintf(buf, sizeof(buf), "Q%d", p->queueLevel);
         drawTextV(buf, colQ, ry, rowH, FONT_BODY, CLR_TEXT);
@@ -482,28 +636,28 @@ static void drawMutexAndMLFQ(int x, int y, int w, int h) {
 
     for (int i = 0; i < 3; i++) {
         Mutex* m = mutexes[i];
-        int cardH = 40;
+        int cardH = 48;
         int hasWait = !isEmpty(&m->blockedQueue);
-        if (hasWait) cardH = 66;
+        if (hasWait) cardH = 76;
 
         DrawRectangleRounded((Rectangle){(float)cx, (float)cy, (float)(w - 28), (float)cardH}, 0.12f, 6, CLR_ROW_ALT);
 
 
         Color dot = m->locked ? CLR_BLOCKED : CLR_READY;
-        DrawCircle(cx + 14, cy + 20, 5, dot);
+        DrawCircle(cx + 16, cy + 24, 6, dot);
 
-        drawText(m->name, cx + 28, cy + 6, FONT_BODY, CLR_TEXT);
+        drawText(m->name, cx + 34, cy + 7, FONT_BODY, CLR_TEXT);
 
         char info[64];
         if (m->locked) snprintf(info, sizeof(info), "LOCKED by P%d", m->ownerPid);
         else           snprintf(info, sizeof(info), "Free");
-        drawText(info, cx + 28, cy + 22, FONT_SMALL, m->locked ? CLR_BLOCKED : CLR_READY);
+        drawText(info, cx + 34, cy + 28, FONT_SMALL, m->locked ? CLR_BLOCKED : CLR_READY);
 
         if (hasWait) {
-            drawText("waiting:", cx + 14, cy + 42, FONT_SMALL, CLR_TEXT_MUTED);
-            drawQueueChips(cx + 80, cy + 40, w - 28 - 80, 22, &m->blockedQueue);
+            drawText("waiting:", cx + 16, cy + 52, FONT_SMALL, CLR_TEXT_MUTED);
+            drawQueueChips(cx + 86, cy + 49, w - 28 - 86, 26, &m->blockedQueue);
         }
-        cy += cardH + 6;
+        cy += cardH + 8;
     }
 
 
@@ -513,7 +667,7 @@ static void drawMutexAndMLFQ(int x, int y, int w, int h) {
 
     int isMLFQ = (strcmp(simState.schedulerMode, "mlfq") == 0);
     for (int i = 0; i < 4; i++) {
-        int cardH = 30;
+        int cardH = 36;
         DrawRectangleRounded((Rectangle){(float)cx, (float)cy, (float)(w - 28), (float)cardH}, 0.2f, 6, CLR_ROW_ALT);
 
         char lbl[16];
@@ -526,9 +680,9 @@ static void drawMutexAndMLFQ(int x, int y, int w, int h) {
         drawTextV(q, cx + 44, cy, cardH, FONT_SMALL, CLR_TEXT_MUTED);
 
         if (isMLFQ)
-            drawQueueChips(cx + 140, cy, w - 28 - 140, cardH, &mlfqQueues[i]);
+            drawQueueChips(cx + 150, cy, w - 28 - 150, cardH, &mlfqQueues[i]);
         else
-            drawTextV("(inactive)", cx + 140, cy, cardH, FONT_SMALL, CLR_TEXT_MUTED);
+            drawTextV("(inactive)", cx + 150, cy, cardH, FONT_SMALL, CLR_TEXT_MUTED);
 
         cy += cardH + 4;
     }
@@ -539,29 +693,90 @@ static void drawMutexAndMLFQ(int x, int y, int w, int h) {
 static void drawLogPanel(int x, int y, int w, int h) {
     drawPanel(x, y, w, h, "EVENT LOG");
 
-    int cx = x + 10;
-    int cy = y + PANEL_HDR_H + 6;
-    int innerH = h - PANEL_HDR_H - 10;
-    int rowH = 16;
+    int cx = x + 12;
+    int cy = y + PANEL_HDR_H + 10;
+    int innerH = h - PANEL_HDR_H - 16;
+    int rowH = 22;
     int visible = innerH / rowH;
     int total = simState.logCount;
     int maxScroll = total - visible;
     if (maxScroll < 0) maxScroll = 0;
 
+    if (simState.logSerial < logPanelSerial)
+        logPanelSerial = 0;
+    if (simState.logSerial != logPanelSerial) {
+        int oldestSerial = simState.logSerial - simState.logCount;
+        if (oldestSerial < 0) oldestSerial = 0;
+        for (int serial = logPanelSerial; serial < simState.logSerial; serial++) {
+            int idx;
+            const char* line;
+            if (serial < oldestSerial)
+                continue;
+            idx = (simState.logHead + (serial - oldestSerial)) % MAX_LOG_LINES;
+            if (idx < 0 || idx >= MAX_LOG_LINES)
+                continue;
+            line = simState.log[idx];
+            if (strstr(line, "OUTPUT:")) {
+                strncpy(lastOutputLine, line, sizeof(lastOutputLine) - 1);
+                lastOutputLine[sizeof(lastOutputLine) - 1] = '\0';
+                if (outputLineCount < 32) {
+                    strncpy(outputLines[outputLineCount], line, LOG_LINE_LEN - 1);
+                    outputLines[outputLineCount][LOG_LINE_LEN - 1] = '\0';
+                    outputLineCount++;
+                } else {
+                    for (int i = 1; i < 32; i++)
+                        strncpy(outputLines[i - 1], outputLines[i], LOG_LINE_LEN);
+                    strncpy(outputLines[31], line, LOG_LINE_LEN - 1);
+                    outputLines[31][LOG_LINE_LEN - 1] = '\0';
+                }
+                outputFollowTail = 1;
+                logFollowTail = 1;
+            }
+        }
+        logPanelSerial = simState.logSerial;
+    }
+
     Rectangle panelArea = {(float)x, (float)y, (float)w, (float)h};
-    static int userScrolled = 0;
+    Rectangle scrollTrack = {(float)(x + w - 14), (float)cy, 6, (float)innerH};
+    static int draggingLog = 0;
     if (CheckCollisionPointRec(GetMousePosition(), panelArea)) {
         float wheel = GetMouseWheelMove();
         if (wheel != 0) {
-            logScroll -= (int)wheel * 2;
-            userScrolled = 1;
+            logScroll -= (int)wheel * 3;
+            logFollowTail = wheel < 0;
         }
         if (logScroll < 0) logScroll = 0;
         if (logScroll > maxScroll) logScroll = maxScroll;
+        if (logScroll >= maxScroll - 1)
+            logFollowTail = 1;
+    }
+
+    if (maxScroll > 0) {
+        int barH = innerH * visible / total;
+        if (barH < 32) barH = 32;
+        float ratio = (float)logScroll / maxScroll;
+        int barY = cy + (int)(ratio * (innerH - barH));
+        Rectangle thumb = {(float)(x + w - 15), (float)barY, 8, (float)barH};
+        Vector2 m = GetMousePosition();
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(m, (Rectangle){scrollTrack.x - 8, scrollTrack.y, 22, scrollTrack.height})) {
+            draggingLog = 1;
+            logFollowTail = 0;
+        }
+        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+            draggingLog = 0;
+        if (draggingLog) {
+            float nt = (m.y - cy - barH / 2.0f) / (float)(innerH - barH);
+            nt = clamp01(nt);
+            logScroll = (int)(nt * maxScroll + 0.5f);
+            if (logScroll >= maxScroll - 1)
+                logFollowTail = 1;
+        }
+        DrawRectangleRounded(scrollTrack, 0.7f, 4, (Color){44, 58, 54, 180});
+        DrawRectangleRounded(thumb, 0.7f, 4, alphaColor(CLR_ACCENT, 230));
     }
 
 
-    if (!userScrolled || logScroll >= maxScroll - 3)
+    if (logFollowTail || logScroll >= maxScroll - 1)
         logScroll = maxScroll;
 
     if (total == 0) {
@@ -569,7 +784,7 @@ static void drawLogPanel(int x, int y, int w, int h) {
         return;
     }
 
-    BeginScissorMode(cx, cy, w - 20, innerH);
+    BeginScissorMode(cx, cy, w - 32, innerH);
     for (int i = 0; i < visible + 1 && (logScroll + i) < total; i++) {
         int logIdx = logScroll + i;
         int idx;
@@ -593,18 +808,11 @@ static void drawLogPanel(int x, int y, int w, int h) {
         else if (strstr(line, "FINISHED"))      tc = CLR_FINISHED;
         else if (strstr(line, "Clock Cycle"))   tc = CLR_ACCENT_HI;
 
-        drawText(line, cx, ry, FONT_MONO, tc);
+        if ((i % 2) == 0)
+            DrawRectangle(cx - 6, ry - 1, w - 44, rowH, (Color){18, 23, 25, 120});
+        drawText(line, cx, ry + 2, FONT_MONO, tc);
     }
     EndScissorMode();
-
-
-    if (maxScroll > 0) {
-        int barH = innerH * visible / total;
-        if (barH < 24) barH = 24;
-        float ratio = (float)logScroll / maxScroll;
-        int barY = cy + (int)(ratio * (innerH - barH));
-        DrawRectangleRounded((Rectangle){(float)(x + w - 8), (float)barY, 3, (float)barH}, 0.5f, 3, CLR_ACCENT);
-    }
 }
 
 
@@ -614,7 +822,7 @@ static void drawInputModal(int screenW, int screenH) {
 
     DrawRectangle(0, 0, screenW, screenH, (Color){0, 0, 0, 170});
 
-    int dw = 520, dh = 200;
+    int dw = 560, dh = 220;
     int dx = (screenW - dw) / 2;
     int dy = (screenH - dh) / 2;
 
@@ -625,24 +833,60 @@ static void drawInputModal(int screenW, int screenH) {
     DrawRectangleRoundedLines((Rectangle){(float)dx, (float)dy, (float)dw, (float)dh}, 0.04f, 8, CLR_ACCENT);
 
 
-    DrawRectangleRounded((Rectangle){(float)dx, (float)dy, (float)dw, 36}, 0.04f, 8, CLR_PANEL_HDR);
-    drawTextV("INPUT REQUIRED", dx + 16, dy, 36, FONT_H1, CLR_ACCENT);
+    DrawRectangleRounded((Rectangle){(float)dx, (float)dy, (float)dw, 42}, 0.04f, 8, CLR_PANEL_HDR);
+    drawTextV("INPUT REQUIRED", dx + 18, dy, 42, FONT_H1, CLR_ACCENT);
 
 
-    drawText(simState.inputPrompt, dx + 24, dy + 50, FONT_BODY, CLR_TEXT);
+    drawText(simState.inputPrompt, dx + 26, dy + 58, FONT_BODY, CLR_TEXT);
 
 
-    Rectangle inputRect = {(float)(dx + 24), (float)(dy + 84), (float)(dw - 48), 36};
+    Rectangle inputRect = {(float)(dx + 26), (float)(dy + 96), (float)(dw - 52), 42};
     DrawRectangleRounded(inputRect, 0.15f, 4, CLR_BG);
     DrawRectangleRoundedLines(inputRect, 0.15f, 4, CLR_ACCENT);
 
     inputActive = 1;
 
-    GuiTextBox(inputRect, inputBuf, sizeof(inputBuf), inputActive);
+    int ctrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+
+    if (ctrlDown && IsKeyPressed(KEY_V)) {
+        const char* clip = GetClipboardText();
+        if (clip) {
+            int len = (int)strlen(inputBuf);
+            for (int i = 0; clip[i] != '\0' && len < (int)sizeof(inputBuf) - 1; i++) {
+                if (clip[i] >= 32 && clip[i] <= 126) {
+                    inputBuf[len++] = clip[i];
+                    inputBuf[len] = '\0';
+                }
+            }
+        }
+    }
+
+    int key = GetCharPressed();
+    while (key > 0) {
+        int len = (int)strlen(inputBuf);
+        if (!ctrlDown && key >= 32 && key <= 126 && len < (int)sizeof(inputBuf) - 1) {
+            inputBuf[len] = (char)key;
+            inputBuf[len + 1] = '\0';
+        }
+        key = GetCharPressed();
+    }
+
+    if ((IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE)) && inputBuf[0] != '\0') {
+        int len = (int)strlen(inputBuf);
+        inputBuf[len - 1] = '\0';
+    }
+
+    BeginScissorMode((int)inputRect.x + 12, (int)inputRect.y + 5, (int)inputRect.width - 24, (int)inputRect.height - 10);
+    drawText(inputBuf[0] ? inputBuf : "Type value here", (int)inputRect.x + 12, (int)inputRect.y + 10, FONT_BODY, inputBuf[0] ? CLR_TEXT : CLR_TEXT_MUTED);
+    if (((int)(GetTime() * 2.0) % 2) == 0) {
+        int caretX = (int)inputRect.x + 13 + measureText(inputBuf, FONT_BODY);
+        DrawRectangle(caretX, (int)inputRect.y + 10, 2, FONT_BODY + 4, CLR_ACCENT);
+    }
+    EndScissorMode();
 
 
     int submit = 0;
-    if (drawButton(dx + dw - 140 - 16, dy + 140, 140, 38, "SUBMIT (Enter)", CLR_ACCENT, CLR_ACCENT_HI, CLR_BG, 1))
+    if (drawButton(dx + dw - 164 - 18, dy + 158, 164, 42, "SUBMIT (Enter)", CLR_ACCENT, CLR_ACCENT_HI, CLR_BG, 1))
         submit = 1;
     if (IsKeyPressed(KEY_ENTER)) submit = 1;
 
@@ -710,11 +954,11 @@ void guiRun(void) {
     int cps[95];
     for (int i = 0; i < 95; i++) cps[i] = 32 + i;
 
-    guiFont = LoadFontEx("C:\\Windows\\Fonts\\segoeui.ttf", 32, cps, 95);
+    guiFont = LoadFontEx("C:\\Windows\\Fonts\\segoeui.ttf", 40, cps, 95);
     if (guiFont.texture.id == 0 || guiFont.glyphCount < 10)
-        guiFont = LoadFontEx("C:\\Windows\\Fonts\\consola.ttf", 32, cps, 95);
+        guiFont = LoadFontEx("C:\\Windows\\Fonts\\consola.ttf", 40, cps, 95);
     if (guiFont.texture.id == 0 || guiFont.glyphCount < 10)
-        guiFont = LoadFontEx("C:\\Windows\\Fonts\\arial.ttf", 32, cps, 95);
+        guiFont = LoadFontEx("C:\\Windows\\Fonts\\arial.ttf", 40, cps, 95);
     if (guiFont.texture.id == 0 || guiFont.glyphCount < 10)
         guiFont = GetFontDefault();
 
@@ -723,6 +967,7 @@ void guiRun(void) {
         SetTextureFilter(guiFont.texture, TEXTURE_FILTER_BILINEAR);
         GuiSetFont(guiFont);
         GuiSetStyle(DEFAULT, TEXT_SIZE, FONT_BODY);
+        GuiSetStyle(TEXTBOX, TEXT_SIZE, FONT_BODY);
     }
 
     TraceLog(LOG_INFO, "FONT: loaded=%d glyphs=%d baseSize=%d texId=%u",
@@ -749,9 +994,10 @@ void guiRun(void) {
 
         BeginDrawing();
         ClearBackground(CLR_BG);
+        drawParticleBackground(w, h, dt);
 
 
-        drawTopBar(w);
+        drawTopBar(w, dt);
         drawControlStrip(HDR_H, w);
 
 
@@ -769,6 +1015,7 @@ void guiRun(void) {
         drawMemoryPanel(lx, mainY, colLeftW, mainH);
         drawExecutionPanel(mx, mainY, colMidW, mainH);
         drawMutexAndMLFQ(rx, mainY, colRightW, mainH);
+        drawParticleOverlay();
 
 
         int logY = mainY + mainH + PAD;

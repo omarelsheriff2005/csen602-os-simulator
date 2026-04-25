@@ -26,6 +26,20 @@ void swapOut(PCB* p) {
     freeBlock(p->memLower, p->memUpper);
     p->inMemory = 0;
     simLog("[SWAP] Process %d swapped OUT to %s", p->pid, filename);
+    simLog("[DISK] %s format: one memory cell per line, in original block order", filename);
+    {
+        FILE* dump = fopen(filename, "r");
+        char line[256];
+        int offset = 0;
+        if (dump) {
+            while (fgets(line, sizeof(line), dump)) {
+                line[strcspn(line, "\r\n")] = '\0';
+                simLog("[DISK] %s[%02d] = %s", filename, offset, line[0] ? line : "<empty>");
+                offset++;
+            }
+            fclose(dump);
+        }
+    }
 }
 
 void swapIn(PCB* p, int newLower) {

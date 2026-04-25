@@ -155,4 +155,5 @@ void scheduleMLFQ(Queue* blockedQ) {
         sprintf(label, "Q%d", i);
         printQueue(&mlfqQueues[i], label);
     }
+    printQueue(blockedQ, "Blocked");
 }
